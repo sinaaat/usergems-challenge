@@ -1,95 +1,47 @@
+import pandas as pd
+import requests
+import trafilatura
 import json
-import os
-import re
 from tqdm import tqdm
-from openai import OpenAI
 from datetime import datetime
 from pathlib import Path
-from dotenv import load_dotenv
 
-load_dotenv()
+# --- Config ---
+INPUT_CSV = '../data/websites.csv'
+OUTPUT_PATH = Path('../data/cleaned_docs/documents.jsonl')
+MAX_COMPANIES = 400  # Set to None to scrape all; or e.g., 50 for testing
 
-# Initialize OpenAI client
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# --- Load CSV ---
+df = pd.read_csv(INPUT_CSV)
+df = df[['CompanyName', 'Website']].dropna()
 
-# File paths
-input_path = Path('../data/cleaned_docs/enriched_documents.jsonl')
-output_path = Path('../data/cleaned_docs/enriched_with_metadata.jsonl')
+# Optional: Limit number of companies
+if MAX_COMPANIES:
+    df = df.sample(n=MAX_COMPANIES, random_state=42)
 
-# Load company content
-with open(input_path, 'r', encoding='utf-8') as f:
-    docs = [json.loads(line) for line in f]
+print(f"🔍 Scraping {len(df)} company websites...")
 
-
-def build_prompt(content):
-    return f"""
-    Extract the following information from the company description below:
-    
-    1. What is the pricing model? If specific prices are mentioned, estimate them.
-    2. Does the company sell to businesses (B2B), consumers (B2C), or both?
-    3. Is there any product pricing mentioned or implied? Look for clues like "affordable", "pricing on request", "enterprise plan", or subscription mentions.
-    
-    Examples:
-    - "Enterprise plan available" → pricing_mentioned: true, price_hint: "enterprise-level pricing"
-    - "Starts from $99/month" → pricing_mentioned: true, price_hint: "$99/month"
-    - "Contact us for pricing" → pricing_mentioned: true, price_hint: "pricing upon request"
-    - No mention of pricing → pricing_mentioned: false, price_hint: null
-    
-    Respond in JSON format with these fields:
-    - business_model
-    - price_hint
-    - pricing_mentioned
-    
-    Company Description:
-    {content[:3000]}
-    """
-
-# Process and enrich
-enriched_output = []
-
-for doc in tqdm(docs):
-    prompt = build_prompt(doc['content'])
+# --- Scraping logic ---
+def extract_text(url):
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are a data extraction assistant."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2
-        )
-
-        raw_response = response.choices[0].message.content.strip()
-
-        # Extract JSON safely using regex
-        match = re.search(r'\{.*?\}', raw_response, re.DOTALL)
-        if match:
-            try:
-                metadata = json.loads(match.group(0))
-            except json.JSONDecodeError:
-                print(f"⚠️ JSON decode error for {doc['company_name']}:")
-                print(raw_response)
-                continue
-        else:
-            print(f"⚠️ No JSON found in response for {doc['company_name']}:")
-            print(raw_response)
-            continue
-
-        # Merge and save enriched doc
-        enriched_doc = {
-            **doc,
-            "metadata_extracted": metadata,
-            "llm_model": "gpt-4o",
-            "processed_at": datetime.utcnow().isoformat()
-        }
-        enriched_output.append(enriched_doc)
-
+        downloaded = trafilatura.fetch_url(url)
+        if downloaded:
+            return trafilatura.extract(downloaded)
     except Exception as e:
-        print(f"⚠️ Error processing {doc['company_name']}: {e}")
+        print(f"⚠️ Error fetching {url}: {e}")
+    return None
 
-# Save to file
-with open(output_path, 'w', encoding='utf-8') as f:
-    for doc in enriched_output:
-        f.write(json.dumps(doc) + '\n')
+# --- Write results ---
+with open(OUTPUT_PATH, 'w', encoding='utf-8') as f:
+    for _, row in tqdm(df.iterrows(), total=len(df)):
+        content = extract_text(row['Website'])
+        if content:
+            doc = {
+                'company_name': row['CompanyName'],
+                'url': row['Website'],
+                'content': content,
+                'timestamp': datetime.utcnow().isoformat()
+            }
+            f.write(json.dumps(doc) + '\n')
 
-print("✅ Metadata extraction complete. Saved to:", output_path)
+print(f"✅ Done. Scraped content saved to {OUTPUT_PATH}")
