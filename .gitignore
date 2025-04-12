@@ -1,0 +1,15 @@
+# Ignore Python cache & virtual envs
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+
+# Ignore vector store & scraped data
+data/
+*.faiss
+*.pkl
+*.jsonl
+
+# IDE files (optional)
+.idea/
